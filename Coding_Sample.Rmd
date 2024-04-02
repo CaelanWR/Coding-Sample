@@ -1,0 +1,209 @@
+---
+title: "Coding Sample"
+author: "Caelan Wilkie-Rogers"
+date: "2024-03-28"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup, include=FALSE}
+install.packages(c("tidyverse","ggplot2","ggmap","sf","tidycensus"))
+library(tidycensus)
+library(sf)
+library(ggmap)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(haven)
+census_api_key("9bf4f788e4f17062abcd437bb936330beb422d68", install = TRUE,overwrite=TRUE)
+
+```
+
+Load and Clean Up Violent Crime Data:
+```{r, include=FALSE}
+#read in Chicago Violent Crime data
+CH_Violent_Crime <- read.csv("CH_Crime.csv")
+#read in Chicago Census tract Tiger Lines
+CH_Tiger_lines <- read.csv("CensusTractsTIGER2010.csv")
+
+
+#Each row is a victim and each case number is a crime
+#Count the number of victims per case
+case_count <- CH_Violent_Crime |>
+  group_by(CASE_NUMBER) |>
+  summarise(count = n())
+#select cases with 4 or more victims
+outliers <- case_count |>
+  filter(count >= 4)
+#remove cases with 4 or more victims
+CH_Violent_Crime <- CH_Violent_Crime|>
+  filter(!(CASE_NUMBER %in% outliers$CASE_NUMBER))
+
+#Take only homicide data from 2016 - 2017 and 2018-2020
+Homicide_df <- CH_Violent_Crime |> filter(INCIDENT_PRIMARY == 'HOMICIDE') |>
+  mutate(DATE = mdy_hms(DATE))|>
+  mutate(YEAR = year(DATE)) |>
+  mutate(After = if_else(YEAR >= 2018,1,0)) |>
+  filter(YEAR >= 2013 & YEAR <= 2022) |>
+  mutate(After =if_else(YEAR >= 2018,1,0))
+```
+
+Placing homicides in census tracts (2010 Geography):
+```{r}
+#Get tract data shapes for cook county in 2010
+tracts_data <- tracts(state = "illinois", county = "Cook County", cb = TRUE, year = 2010)
+#Get correct GEOID format
+tracts_data$GEOID <- substring(tracts_data$GEO_ID , 10,21)
+#Covert to shape file
+Homicide_sf <- st_as_sf(Homicide_df, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+#convert to compatible coordinate referance system
+Homicide_sf <- st_transform(Homicide_sf, crs = st_crs(tracts_data))
+#Shape join
+joined_data <- st_join(Homicide_sf, tracts_data, left = FALSE)
+#Get rid of unnecessary cols
+joined_data <- joined_data |> select(UNIQUE_ID,TRACT, GEOID)
+#Join tract data with other homicide data
+Homicide_df_with_tracts <-left_join( Homicide_df,joined_data, by = 'UNIQUE_ID') |>
+  st_drop_geometry(Homicide_df_with_tracts) |>
+  mutate(GEOID = as.character(GEOID))
+```
+
+Aggregate Data by Cencus Tract:
+```{r}
+#Convert GEOID to a string
+CH_Tiger_lines$GEOID <- as.character(CH_Tiger_lines$GEOID10 )
+#Get all Chicago GEOID so that tracts without homicides aren't dropped
+complete_geo_ids <- CH_Tiger_lines |>
+  select(GEOID) |>
+  distinct(GEOID)
+
+#Aggregate by tract 
+data_aggregated_tract <- Homicide_df_with_tracts |>
+  group_by(GEOID,After) |>
+  summarise(count= n(), .groups = 'drop') |>
+  right_join(complete_geo_ids, by = "GEOID") |>
+  pivot_wider(names_from = After, values_from = count, names_prefix = "count_") |>
+  rename( count_before = count_0,
+         count_after = count_1) |>
+  select(-c(count_NA))
+  
+ 
+#Replace NAs with zeros
+data_aggregated_tract[is.na(data_aggregated_tract)== T ] <- 0 
+```
+
+Get census population data:
+```{r}
+population_data2022 <- get_acs(
+  geography = "tract",
+  variables =  c("B01003_001"),
+  state = "IL", 
+  year = 2022,
+  geometry = FALSE) |>
+  select('variable','estimate', 'GEOID') |>
+  pivot_wider(names_from ='variable', values_from = 'estimate')
+
+
+population_data2017 <- get_acs(
+  geography = "tract",
+  variables = c("B01003_001"),
+  state = "IL", 
+  year = 2017,
+  geometry = FALSE) |> 
+  select('variable','estimate', 'GEOID') |>
+  pivot_wider(names_from ='variable', values_from = 'estimate')
+
+population_data2017 <- population_data2017 |> 
+  rename(Total_Pop_2017 = B01003_001) |>
+  filter(GEOID %in% complete_geo_ids$GEOID)
+
+population_data2022 <- population_data2022 |> 
+  rename(Total_Pop_2022 = B01003_001)
+```
+
+Convert 2020 cencus tracts to 2010 using IPUMS crosswalk for IL:
+```{r}
+#Read in IPUMS crosswalk data
+crosswalk <- read.csv("2020to2010tracts.csv")
+# Convert GEOID vars to strings 
+crosswalk$GEOID20 <- as.character(crosswalk$GEOID20)
+crosswalk$GEOID10 <- as.character(crosswalk$GEOID10)
+#Remove the Block codes from GEOIDs
+crosswalk$GEOID20 <- substring(crosswalk$GEOID20, 1,11)
+crosswalk$GEOID10 <- substring(crosswalk$GEOID10, 1,11)
+# Normalize weights because crosswalks are made for block level data not tract
+crosswalk <- crosswalk |>
+  group_by(GEOID20) |>
+  mutate(total_weight = sum(WEIGHT)) |>
+  ungroup() |>
+  mutate(WEIGHT = WEIGHT / total_weight)
+
+# Join the 2020 income data with normalized crosswalk to get weights for 2010 tracts
+harmonized_data <- population_data2022 |>
+  left_join(crosswalk, by = c("GEOID" = "GEOID20"))
+
+# Calculate weighted populations for the 2010 tracts
+harmonized_data <- harmonized_data |>
+  mutate(weighted_population = Total_Pop_2022 * WEIGHT) |>
+  group_by(GEOID10) |>
+  summarize(Total_Pop_2022 = sum(weighted_population), .groups = 'drop')
+#Keep only tracts that are in the city of Chicago 
+population_data2022 <- harmonized_data |>
+  filter(GEOID10 %in% complete_geo_ids$GEOID) |>
+  rename(GEOID = GEOID10)
+```
+
+
+```{r}
+#add population data to aggregated homicide data
+map_data <- data_aggregated_tract |> 
+  left_join(population_data2017, by = "GEOID") |>
+  left_join(population_data2022, by = "GEOID") |>
+  #remove the three tracts that are in the lake and have a population of zero
+  filter(Total_Pop_2017 & Total_Pop_2022 != 0)|>
+  #find the homicides per resident in each of the 5 year periods
+  mutate(Homicides_per_Resident_2013_2017 = count_before/Total_Pop_2017,
+         Homicides_per_Resident_2018_2022 = count_after/Total_Pop_2022,
+         Change_Homicides_per_Resident = Homicides_per_Resident_2018_2022 - Homicides_per_Resident_2013_2017)
+  
+#Get census map shapes
+Tiger_map <- st_as_sf(CH_Tiger_lines, wkt = "the_geom", crs = 4326) |>
+#remove the three tracts that are in the lake and have a population of zero
+  filter(GEOID %in% map_data$GEOID)
+
+```
+
+```{r}
+ggplot(data = Tiger_map) +
+  geom_sf(aes(fill = map_data$Change_Homicides_per_Resident), color = NA) +
+  scale_fill_viridis_c(option = "magma")+ 
+  labs(fill = "",title = 'Change in Homicides per Resident', subtitle = "Between 2013-2017 & 2018-2022") +
+  theme_minimal() + 
+  theme(legend.position = "bottom") 
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
