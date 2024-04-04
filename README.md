@@ -11,12 +11,11 @@ This repository contains a data science project analyzing homicide rates in Chic
 - `2020to2010tracts.csv`: Crosswalk data to convert 2020 census tracts to 2010 geography.
 - `census_population_data2017.csv`: Population data by census tract for 2017, sourced from the American Community Survey (ACS).
 - `census_population_data2022.csv`: Population data by census tract for 2022, sourced from the ACS.
-- `Chicago_Homicide_Analysis.Rmd`: The R Markdown document containing the complete analysis workflow, from data loading and cleaning to visualization.
-- `Chicago_Homicide_Analysis.pdf`: The rendered PDF output of the analysis.
+- `Coding_Sample.Rmd`: The R Markdown document containing the complete analysis workflow, from data loading and cleaning to visualization.
 
 ## Prerequisites
 
 To run the analysis, you will need R installed on your machine, along with several R packages. You can install the required packages by running the following command in R:
 
 ```R
-install.packages(c("tidyverse", "sf", "tigris", "plm", "lubridate", "ggplot2", "readr", "dplyr", "tidyr"))
+install.packages(c("tidyverse","sf","plm"))
